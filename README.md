@@ -6,8 +6,7 @@ Small CUDA experiment for checking whether an NVIDIA GPU appears to provide
 ## Build
 
 ```bash
-cmake -S . -B build
-cmake --build build -j
+./compile.sh
 ```
 
 ## Run
