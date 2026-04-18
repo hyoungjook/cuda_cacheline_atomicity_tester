@@ -114,8 +114,12 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaSetDevice(device_ordinal));
     config.print();
 
-    const ExperimentResult result = cacheline_atomicity::run_experiment(config);
-    result.print();
+    std::cout << "Test with tile_size=32" << std::endl;
+    const ExperimentResult result32 = cacheline_atomicity::run_experiment<32>(config);
+    result32.print();
+    std::cout << "Test with tile_size=16" << std::endl;
+    const ExperimentResult result16 = cacheline_atomicity::run_experiment<16>(config);
+    result16.print();
   } catch (const std::exception& exception) {
     std::cerr << "error: " << exception.what() << '\n';
     return 1;

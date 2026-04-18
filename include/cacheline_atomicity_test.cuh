@@ -18,7 +18,6 @@ namespace cacheline_atomicity {
 
 inline constexpr int kCacheLineBytes = 128;
 inline constexpr int kCacheLineWords = kCacheLineBytes / sizeof(std::uint32_t);
-inline constexpr int kTileSize = 32;
 inline constexpr int kThreadsPerBlock = 128;
 
 struct DeviceCounters {
@@ -36,8 +35,9 @@ struct DeviceCounters {
   }
 };
 
-__device__ std::uint32_t* line_at(std::uint32_t* cache_lines, std::uint32_t line_index) {
-  return cache_lines + (static_cast<std::size_t>(line_index) * kCacheLineWords);
+template <typename elem_type>
+__device__ elem_type* line_at(std::uint32_t* cache_lines, std::uint32_t line_index) {
+  return reinterpret_cast<elem_type*>(cache_lines + (static_cast<std::size_t>(line_index) * kCacheLineWords));
 }
 template <typename elem_type, typename tile_type>
 __device__ bool check_clean_line(elem_type per_lane_elem, const tile_type& tile) {
@@ -46,13 +46,16 @@ __device__ bool check_clean_line(elem_type per_lane_elem, const tile_type& tile)
   return mismatch == 0 ;
 }
 
+template <int tile_size>
 __global__ __launch_bounds__(kThreadsPerBlock) void tester_kernel(
     std::uint32_t* cache_lines,
     std::uint32_t cache_line_count,
     volatile int* stop_flag,
     DeviceCounters* counters) {
+  static_assert(tile_size == 32 || tile_size == 16);
+  using elem_type = std::conditional_t<tile_size == 32, std::uint32_t, std::uint64_t>;
   auto block = cooperative_groups::this_thread_block();
-  auto tile = cooperative_groups::tiled_partition<kTileSize>(block);
+  auto tile = cooperative_groups::tiled_partition<tile_size>(block);
   const int global_thread_id = blockIdx.x * blockDim.x + threadIdx.x;
   curandState rand_state;
   curand_init(1234ull, global_thread_id, 0, &rand_state);
@@ -71,23 +74,28 @@ __global__ __launch_bounds__(kThreadsPerBlock) void tester_kernel(
 
     const std::uint32_t rand_value = curand(&rand_state);
     const auto write_line_index = tile.shfl(rand_value, 0) % cache_line_count;
-    const std::uint32_t write_elem = tile.shfl(rand_value, 1);
-    const auto read_weak_line_index = tile.shfl(rand_value, 2) % cache_line_count;
-    const auto read_atomic_line_index = tile.shfl(rand_value, 3) % cache_line_count;
+    elem_type write_elem = static_cast<elem_type>(tile.shfl(rand_value, 1));
+    if constexpr (std::is_same_v<elem_type, std::uint64_t>) {
+      write_elem = write_elem | (static_cast<std::uint64_t>(tile.shfl(rand_value, 2)) << 32);
+    }
+    const auto read_weak_line_index = tile.shfl(rand_value, 3) % cache_line_count;
+    const auto read_atomic_line_index = tile.shfl(rand_value, 4) % cache_line_count;
 
     // write
-    const auto write_line = line_at(cache_lines, write_line_index);
+    const auto write_line = line_at<elem_type>(cache_lines, write_line_index);
     cacheline_acquire(write_line, tile);
     cacheline_store_release(write_line, write_elem, tile);
 
     // read_weak
-    const auto read_weak_elem = cacheline_load<false>(line_at(cache_lines, read_weak_line_index), tile);
+    const auto read_weak_line = line_at<elem_type>(cache_lines, read_weak_line_index);
+    const auto read_weak_elem = cacheline_load<false>(read_weak_line, tile);
     if (check_clean_line(read_weak_elem, tile)) {
       local_counters.clean_weak_reads++;
     }
 
     // read_atomic
-    const auto read_atomic_elem = cacheline_load<true>(line_at(cache_lines, read_atomic_line_index), tile);
+    const auto read_atomic_line = line_at<elem_type>(cache_lines, read_atomic_line_index);
+    const auto read_atomic_elem = cacheline_load<true>(read_atomic_line, tile);
     if (check_clean_line(read_atomic_elem, tile)) {
       local_counters.clean_atomic_reads++;
     }
@@ -100,6 +108,7 @@ __global__ __launch_bounds__(kThreadsPerBlock) void tester_kernel(
   }
 }
 
+template <int tile_size>
 inline ExperimentResult run_experiment(const ExperimentConfig& config) {
   if (config.cache_line_count == 0) {
     throw std::invalid_argument("cache line count must be positive");
@@ -133,14 +142,14 @@ inline ExperimentResult run_experiment(const ExperimentConfig& config) {
     CUDA_CHECK(cudaGetDeviceProperties(&properties, 0));
     int blocks_per_sm = 0;
     CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-        &blocks_per_sm, tester_kernel, kThreadsPerBlock, 0));
+        &blocks_per_sm, tester_kernel<tile_size>, kThreadsPerBlock, 0));
     int num_blocks = blocks_per_sm * properties.multiProcessorCount;
     if (num_blocks <= 0) {
       throw std::runtime_error("failed to compute a valid launch configuration");
     }
 
     const auto start_time = std::chrono::steady_clock::now();
-    tester_kernel<<<num_blocks, kThreadsPerBlock, 0, kernel_stream>>>(
+    tester_kernel<tile_size><<<num_blocks, kThreadsPerBlock, 0, kernel_stream>>>(
       cache_lines, config.cache_line_count, stop_flag, counters);
 
     CUDA_CHECK(cudaGetLastError());
