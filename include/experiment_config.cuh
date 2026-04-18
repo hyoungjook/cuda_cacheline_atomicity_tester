@@ -6,7 +6,7 @@
 namespace cacheline_atomicity {
 
 struct ExperimentConfig {
-  std::uint32_t cache_line_count = 1000000;
+  std::uint32_t cache_line_count = 1000;
   std::uint64_t timeout_ms = 60000;
   void print() const {
     std::cout << "Configs:" << std::endl;
@@ -36,7 +36,10 @@ struct ExperimentResult {
     std::cout << "    Clean atomic reads: " << clean_atomic_reads << '\n';
     std::cout << "    Torn atomic reads: " << torn_atomic_reads << '\n';
     if (torn_weak_reads == 0 && torn_atomic_reads == 0) {
-      std::cout << "No torn read was observed.\n";
+      std::cout << "No torn read was observed." << std::endl;
+    }
+    else {
+      std::cout << "ERROR: observed torn reads." << std::endl;
     }
   }
 };
