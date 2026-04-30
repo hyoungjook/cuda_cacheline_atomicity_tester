@@ -15,7 +15,9 @@ __device__ elem_type cacheline_load(elem_type* line, const tile_type& tile) {
     tile.sync();
   }
   else {
+    tile.sync();
     elem = line[tile.thread_rank()];
+    tile.sync();
   }
   return elem;
 }
